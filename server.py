@@ -1,198 +1,228 @@
 #!/usr/bin/python
 
+#################################################################
+#                                                               #
+#   XML-RPC Server                                              #
+#   Projekt zaliczeniowy z Pracowni Jezykow Skryptowych         #
+#   Uniwersytet Jagiellonski, Krakow                            #
+#                                                               #
+#   Serwer XML-RPC                                              #
+#   (c) 2014 Marcin Radlak                                      #
+#   marcin.radlak@uj.edu.pl                                     #
+#   http://marcinradlak.pl                                      #
+#                                                               #
+#################################################################
+
+import getopt
+import sys
+import shelve
 import uuid
 import base64
 import socket
-import shelve
 import Cookie
-import getopt
-import sys
 from SimpleXMLRPCServer import *  
 
-class UserManagement:
-    def __init__(self):
-        self.d = shelve.open('machines.shv')
+class Host:
+  def __init__(self):
+    self.db = shelve.open('hosts.shv')
 
-        # register a list of valid machine names/email id's 
-        validconfig = {'email@address.com':'vaikings'}
-        for k,v in validconfig.items():
-            self.generateUuid(k,v)
+    # lista autoryzowanych hostow serwera
+    validconfig = { 'email@address.com': 'vaikings' }
 
-    def generateUuid(self, email_id, machine_name):
-        """ return a uuid which uniquely identifies machinename and email id """
-        uuidstr = None
+    for email, host in validconfig.items():
+      self.generate_id(email, host)
 
-        if machine_name not in self.d:
-            myNamespace = uuid.uuid3(uuid.NAMESPACE_URL, machine_name)
-            uuidstr = str(uuid.uuid3(myNamespace, email_id)) 
+  # generujemy id dla kazdego polaczonego hosta
+  def generate_id(self, email, host):
+    host_id = None
 
-            self.d[machine_name] = (machine_name, uuidstr, email_id)
-            self.d[uuidstr] = (machine_name, uuidstr ,email_id)
-        else:
-            (machine_name, uuidstr, email_id) = self.d[machine_name]
+    if host not in self.db:
+      myNamespace = uuid.uuid3(uuid.NAMESPACE_URL, host)
+      host_id = str(uuid.uuid3(myNamespace, email)) 
 
-        return uuidstr
+      self.db[host] = (host, host_id, email)
+      self.db[host_id] = (host, host_id, email)
 
-    def checkMe(self, id):
-        if id in self.d:
-            return self.d[id]
-        return (None,None,None)
+    else:
+      (host, host_id, email) = self.db[host]
 
-    def __del__(self):
-        self.d.close()
+    return host_id
 
-def authenticate(id):
-    sk = UserManagement()
-    return sk.checkMe(id)
+  def sign_in(self, id):
+    if id in self.db:
+      return self.db[id]
+    return (None, None, None)
 
-class MySimpleXMLRPCRequestHandler(SimpleXMLRPCRequestHandler):
-    def setCookie(self, key=None ,value=None):
-        if key :
-            c1 = Cookie.SimpleCookie()
-            c1[key] = value
-            cinfo = self.getDefaultCinfo() 
-            for attr,val in cinfo.items():
-                c1[key][attr] = val
+  def __del__(self):
+    self.db.close()
+
+class RequestHandler(SimpleXMLRPCRequestHandler):
+  def set_up_cookie(self, key = None, value = None):
+    if key:
+      cookie = Cookie.SimpleCookie()
+      cookie[key] = value
+
+      tags = {
+        'expires': 30*24*60*60,
+        'path': '/RPC2/',
+        'comment': 'comment!',
+        'domain': '.localhost.local',
+        'max-age': 30*24*60*60,
+        'secure': '',
+        'version': 1
+      } 
+
+      for attr, val in tags.items():
+        cookie[key][attr] = val
                             
-            if c1 not in self.cookies:
-                self.cookies.append(c1)
+      if cookie not in self.cookies:
+        self.cookies.append(cookie)
+                 
+  # Interpretuje wszystkie request'y HTTP jako wywolania XML-RPC  
+  # Obsluga cookies'ow         
+  def do_POST(self):
+    if not self.is_rpc_path_valid():
+      self.report_404("404 Unknown path.")
+      return
 
-    def getDefaultCinfo(self):
-        cinfo = {}
+    try:      
+      data = []
+      # czytamy porcjami max 10mb w celu unikniecia blokady serwera
+      max_size = 10 * 1024 * 1024
+      real_size = int(self.headers["content-length"])
+      
+      while real_size:
+        size = min(real_size, max_size)
+        data.append(self.rfile.read(size))
+        real_size -= len(data[-1])
+        data = ''.join(data)
 
-        cinfo['expires'] = 30*24*60*60
-        cinfo['path'] = '/RPC2/'
-        cinfo['comment'] = 'comment!'
-        cinfo['domain'] = '.localhost.local'
-        cinfo['max-age'] = 30*24*60*60
-        cinfo['secure'] = ''
-        cinfo['version']= 1
-        
-        return cinfo
-                            
-    def do_POST(self):
-        """Handles the HTTP POST request.
+        response = self.server._marshaled_dispatch(data, getattr(self, '_dispatch', None))
+    except:
+      # Internal server error 
+      self.send_response(500)
+      self.end_headers()
 
-        Attempts to interpret all HTTP POST requests as XML-RPC calls,
-        which are forwarded to the server's _dispatch method for handling.
-        """
-        #Note: this method is the same as in SimpleXMLRPCRequestHandler, 
-        #just hacked to handle cookies 
+    else:
+      self.send_response(200)
+      self.send_header("Content-type", "text/xml")
+      self.send_header("Content-length", str(len(response)))
 
-        # Check that the path is legal
-        if not self.is_rpc_path_valid():
-            self.report_404()
-            return
-
-        try:
-            # Get arguments by reading body of request.
-            # We read this in chunks to avoid straining
-            # socket.read(); around the 10 or 15Mb mark, some platforms
-            # begin to have problems (bug #792570).
-            max_chunk_size = 10*1024*1024
-            size_remaining = int(self.headers["content-length"])
-            L = []
-            while size_remaining:
-                chunk_size = min(size_remaining, max_chunk_size)
-                L.append(self.rfile.read(chunk_size))
-                size_remaining -= len(L[-1])
-            data = ''.join(L)
-
-            # In previous versions of SimpleXMLRPCServer, _dispatch
-            # could be overridden in this class, instead of in
-            # SimpleXMLRPCDispatcher. To maintain backwards compatibility,
-            # check to see if a subclass implements _dispatch and dispatch
-            # using that method if present.
-            response = self.server._marshaled_dispatch(
-                    data, getattr(self, '_dispatch', None)
-                )
-        except: # This should only happen if the module is buggy
-            # internal error, report as HTTP server error
-            self.send_response(500)
-            self.end_headers()
-        else:
-            # got a valid XML RPC response
-            self.send_response(200)
-            self.send_header("Content-type", "text/xml")
-            self.send_header("Content-length", str(len(response)))
-
-            # HACK :start -> sends cookies here 
-            if self.cookies:
-                for cookie in self.cookies:
-                    self.send_header('Set-Cookie',cookie.output(header=''))
-            # HACK :end
+      # przesylanie cookies
+      if self.cookies:
+        for cookie in self.cookies:
+          self.send_header('Set-Cookie', cookie.output(header = ""))
             
-            self.end_headers()
-            self.wfile.write(response)
+      self.end_headers()
+      self.wfile.write(response)
+      self.wfile.flush()
+      self.connection.shutdown(1)
 
-            # shut down the connection
-            self.wfile.flush()
-            self.connection.shutdown(1)
+  def authenticate(self, id):
+    sk = Host()
+    return sk.sign_in(id)
 
-    def authenticate_client(self):
-        validuser = False
+  def authenticate_client(self):
+    auth = False
 
-        if self.headers.has_key('Authorization'):
-            # handle Basic authentication
-            (enctype, encstr) =  self.headers.get('Authorization').split()
-            (emailid, machine_name) = base64.standard_b64decode(encstr).split(':')
-            (auth_machine, auth_uuidstr, auth_email) = authenticate(machine_name)
+    if self.headers.has_key('Authorization'):
+      (enctype, encstr) =  self.headers.get('Authorization').split()
+      (email, host) = base64.standard_b64decode(encstr).split(':')
+      (auth_machine, auth_id, auth_email) = self.authenticate(host)
 
-            if emailid == auth_email:
-                print "Authenticated"
-                # set authentication cookies on client machines
-                validuser = True
-                if auth_uuidstr:
-                    self.setCookie('UUID',auth_uuidstr)
+      if email == auth_email:
+        auth = True
+        print "Authenticated"
+
+        if auth_id:
+          self.set_up_cookie('ID', auth_id)
                     
-        elif self.headers.has_key('UUID'):
-            # handle cookie based authentication
-            id =  self.headers.get('UUID')
-            (auth_machine, auth_uuidstr, auth_email) = authenticate(id)
+    elif self.headers.has_key('ID'):
+      id =  self.headers.get('ID')
+      (auth_machine, auth_id, auth_email) = self.authenticate(id)
 
-            if auth_uuidstr :
-                print "Authenticated"
-                validuser = True
-        else:
-            print 'Authentication failed'
-
-        return validuser
-
-    def _dispatch(self, method, params):    
-        self.cookies = []
+      if auth_id :
+        auth = True
+        print "Authenticated"
         
-        validuser = self.authenticate_client() 
-        # handle request        
-        if method == 'hello_world':                
-            (input1, input2) = params    
-            retstr = XMLRPC_register().hello_world(input1, input2, validuser)
-            return retstr
-        else:
-            return 'Invalid Method [%s]'%method
+    else:
+      print 'Authentication failed'
 
-# functions available as web services
-class XMLRPC_register:
-    def hello_world(self, t1, t2, validuser):
-        if validuser:
-            return t1+'-'+t2
-        else:
-            return "please register ur machine"
+    return auth
 
+  # obsluga web service'ow
+  def _dispatch(self, service, vars):    
+    self.cookies = []        
+    auth = self.authenticate_client()   
 
+    if service == 'add':                
+      (var1, var2) = vars    
+      return WebServices().add(var1, var2)
+    elif service == 'minus':                
+      (var1, var2) = vars    
+      return WebServices().minus(var1, var2)
+    elif service == 'println':                  
+      return WebServices().println(vars)
+    else:
+      return "Service " + service + " doesn't exist."
+
+# dostepne web service's
+class WebServices:
+  def add(self, var1, var2):
+    s = var1 + var2
+    return str(var1) + " + " + str(var2) + " = " + str(s)
+
+  def minus(self, var1, var2):
+    s = var1 - var2
+    return str(var1) + " - " + str(var2) + " = " + str(s)
+
+  def println(self, var):
+    return var
+
+def usage():
+  print "-----------------------------------------------------------------------------------------------\n"
+  print " XML-RPC Server\n\n"
+  print " Uzycie: program [-s SERWER] [-p PORT] [--help|-h]\n\n"
+  print " Program do automatycznej synchronizacji plikow na lokalnym serwerze ze zdalnym serwerem FTP.\n"
+  print " Program porownuje pliki i foldery zawarte w katalogu podanym przez uzytkownika z zawartoscia\n"
+  print " na serwerze FTP. Program rozroznia poszczegole przypadki zawartosci:\n"
+  print " 1. Jesli plik znajduje sie na serwerze lokalnym, a na serwerze FTP nie, to zostanie wyslany.\n"
+  print " 2. Jesli plik znajduje sie na serwerze FTP, a na serwerze lokalnym nie, to zostanie usuniety.\n"
+  print " 3. Jesli plik znajduje sie na serwerze lokalnym oraz a na serwerze FTP, to zostana porownane\n"
+  print " wersje. Jesli wersja pliku lokalnego okaze sie nowsza od zdalnej to plik zostanie nadpisany.\n"
+  print "-----------------------------------------------------------------------------------------------\n"
 
 # glowna funkcja
 def main():
-    try:
-      opts, args = getopt.getopt(sys.argv[1:], "hs:u:", ["help"])
+  try:
+    opts, args = getopt.getopt(sys.argv[1:], "hs:p:", ["help"])
 
-      se = SimpleXMLRPCServer(("localhost", 8088), MySimpleXMLRPCRequestHandler, True, True)
-      se.register_introspection_functions()
-      se.serve_forever()
-    except getopt.GetoptError as err:
-      print str(err)
-      usage()
-      sys.exit(1)
+    serv = "localhost"
+    port = 8088
+
+    for opt, val in opts:
+      if opt in ("-h", "--help"):
+        usage()
+        sys.exit(0)
+      elif opt == "-s":
+        serv = val
+      elif opt == "-p":
+        port = int(val)
+
+    server = SimpleXMLRPCServer((serv, port), RequestHandler, True, True)
+    server.register_introspection_functions()
+    server.serve_forever()
+
+  except getopt.GetoptError as err:
+    print str(err)
+    usage()
+    sys.exit(1)
+  except ValueError:
+    usage()
+    sys.exit(1)
+  except KeyboardInterrupt:
+    sys.exit(0)
 
 # main
 if __name__ == '__main__':
-    main()
+  main()
