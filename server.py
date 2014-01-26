@@ -26,25 +26,22 @@ class Host:
   def __init__(self):
     self.db = shelve.open('hosts.shv')
 
-    # lista autoryzowanych hostow serwera
-    validconfig = { 'email@address.com': 'vaikings' }
-
-    for email, host in validconfig.items():
-      self.generate_id(email, host)
+  def __del__(self):
+    self.db.close()
 
   # generujemy id dla kazdego polaczonego hosta
-  def generate_id(self, email, host):
+  def generate_id(self, email, password):
     host_id = None
 
-    if host not in self.db:
-      myNamespace = uuid.uuid3(uuid.NAMESPACE_URL, host)
-      host_id = str(uuid.uuid3(myNamespace, email)) 
+    if email not in self.db:
+      name = uuid.uuid3(uuid.NAMESPACE_URL, email)
+      host_id = str(uuid.uuid3(name, email)) 
 
-      self.db[host] = (host, host_id, email)
-      self.db[host_id] = (host, host_id, email)
+      self.db[email] = (email, password, host_id)
+      self.db[host_id] = (email, password, host_id)
 
     else:
-      (host, host_id, email) = self.db[host]
+      (email, password, host_id) = self.db[email]
 
     return host_id
 
@@ -52,10 +49,7 @@ class Host:
     if id in self.db:
       return self.db[id]
     return (None, None, None)
-
-  def __del__(self):
-    self.db.close()
-
+  
 class RequestHandler(SimpleXMLRPCRequestHandler):
   def set_up_cookie(self, key = None, value = None):
     if key:
@@ -63,11 +57,11 @@ class RequestHandler(SimpleXMLRPCRequestHandler):
       cookie[key] = value
 
       tags = {
-        'expires': 30*24*60*60,
+        'expires': 30 * 24 * 60 * 60,
         'path': '/RPC2/',
-        'comment': 'comment!',
+        'comment': '',
         'domain': '.localhost.local',
-        'max-age': 30*24*60*60,
+        'max-age': 30 * 24 * 60 * 60,
         'secure': '',
         'version': 1
       } 
@@ -98,6 +92,7 @@ class RequestHandler(SimpleXMLRPCRequestHandler):
         data = ''.join(data)
 
         response = self.server._marshaled_dispatch(data, getattr(self, '_dispatch', None))
+
     except:
       # Internal server error 
       self.send_response(500)
@@ -119,41 +114,60 @@ class RequestHandler(SimpleXMLRPCRequestHandler):
       self.connection.shutdown(1)
 
   def authenticate(self, id):
-    sk = Host()
-    return sk.sign_in(id)
+    host = Host()
+    return host.sign_in(id)
+
+  def register(self, email, password):
+    host = Host()
+    host.generate_id(email, password)
 
   def authenticate_client(self):
     auth = False
 
-    if self.headers.has_key('Authorization'):
-      (enctype, encstr) =  self.headers.get('Authorization').split()
-      (email, host) = base64.standard_b64decode(encstr).split(':')
-      (auth_machine, auth_id, auth_email) = self.authenticate(host)
+    if self.headers.has_key('signin'):
+      (etype, e) =  self.headers.get('signin').split()
+      (email, password) = base64.standard_b64decode(e).split(':')
+      (auth_email, auth_password, auth_id) = self.authenticate(email)
 
-      if email == auth_email:
+      if email == auth_email and password == auth_password:
         auth = True
-        print "Authenticated"
+        print "Host '" + auth_email + "' authenticated."
 
         if auth_id:
           self.set_up_cookie('ID', auth_id)
+
+    elif self.headers.has_key("register"):
+      print "Registering new host..."
+      (etype, e) =  self.headers.get('register').split()
+      (email, password) = base64.standard_b64decode(e).split(':')
+      self.register(email, password)  
+      (auth_email, auth_password, auth_id) = self.authenticate(email)  
+
+      if email == auth_email and password == auth_password:
+        auth = True 
+        self.set_up_cookie('ID', auth_id)
+        print "Host '" + auth_email + "' registered and authenticated."
                     
     elif self.headers.has_key('ID'):
       id =  self.headers.get('ID')
-      (auth_machine, auth_id, auth_email) = self.authenticate(id)
+      (auth_email, auth_password, auth_id) = self.authenticate(id)
 
-      if auth_id :
+      if auth_id:
         auth = True
-        print "Authenticated"
-        
+        print "Host '" + auth_email + "' authenticated."
+
     else:
-      print 'Authentication failed'
+      print "Authentication failed."
 
     return auth
 
   # obsluga web service'ow
   def _dispatch(self, service, vars):    
     self.cookies = []        
-    auth = self.authenticate_client()   
+    auth = self.authenticate_client() 
+
+    if not auth:
+      return "Authentication failed."
 
     if service == 'add':                
       (var1, var2) = vars    
@@ -183,13 +197,14 @@ def usage():
   print "-----------------------------------------------------------------------------------------------\n"
   print " XML-RPC Server\n\n"
   print " Uzycie: program [-s SERWER] [-p PORT] [--help|-h]\n\n"
-  print " Program do automatycznej synchronizacji plikow na lokalnym serwerze ze zdalnym serwerem FTP.\n"
-  print " Program porownuje pliki i foldery zawarte w katalogu podanym przez uzytkownika z zawartoscia\n"
-  print " na serwerze FTP. Program rozroznia poszczegole przypadki zawartosci:\n"
-  print " 1. Jesli plik znajduje sie na serwerze lokalnym, a na serwerze FTP nie, to zostanie wyslany.\n"
-  print " 2. Jesli plik znajduje sie na serwerze FTP, a na serwerze lokalnym nie, to zostanie usuniety.\n"
-  print " 3. Jesli plik znajduje sie na serwerze lokalnym oraz a na serwerze FTP, to zostana porownane\n"
-  print " wersje. Jesli wersja pliku lokalnego okaze sie nowsza od zdalnej to plik zostanie nadpisany.\n"
+  print " Prosty serwer XML-RPC udostepniajacy przykladowe web services, ktore sa wywolywane w\n"
+  print " requestach od klientow. Zanim serwer obsluzy jakiegokolwiek klienta musi go autoryzowac, a gdy\n"
+  print " klient nie ma uprawnien to zostane odrzucony. Serwer ustawia cookies'y po stronie klienta,\n"
+  print " zapisujac tym samym dane klienta w celu ulatwienia dalszych autoryzacji.\n"
+  print " Web Services:\n"
+  print " 'add(v1, v2)' - dodawanie\n"
+  print " 'minus(v1, v2)' - odejmowanie\n"
+  print " 'println(v)' - zwracanie stringa\n"
   print "-----------------------------------------------------------------------------------------------\n"
 
 # glowna funkcja

@@ -1,118 +1,172 @@
-#!/usr/bin/python
+#!/usr/bin/env python2.6
 
+#################################################################
+#                                                               #
+#   XML-RPC Client                                              #
+#   Projekt zaliczeniowy z Pracowni Jezykow Skryptowych         #
+#   Uniwersytet Jagiellonski, Krakow                            #
+#                                                               #
+#   Klient wywolan XML-RPC                                      #
+#   (c) 2014 Marcin Radlak                                      #
+#   marcin.radlak@uj.edu.pl                                     #
+#   http://marcinradlak.pl                                      #
+#                                                               #
+#################################################################
+
+import getopt
+import sys
 import os
+import cookielib
 import base64
 import xmlrpclib
 import urllib2
-import cookielib
 
-class CookieAuthXMLRPCTransport(xmlrpclib.Transport):
-    """ xmlrpclib.Transport that sends basic HTTP Authentication"""
+class Cookie:
+  def __init__(self, content):
+    self.content = content
 
-    user_agent = '*py*'
-    credentials = ()
-    cookiefile = 'cookies.lwp'
-        
-    def send_basic_auth(self, connection):
-        """Include HTTP Basic Authentication data in a header"""
-        
-        auth = base64.encodestring("%s:%s"%self.credentials).strip()
-        auth = 'Basic %s' %(auth,)
-        connection.putheader('Authorization',auth)
+  def info(self):
+    return self.content
 
-    def send_cookie_auth(self, connection):
-        """Include Cookie Authentication data in a header"""
-        
-        cj = cookielib.LWPCookieJar()
-        cj.load(self.cookiefile)
+class CookieClientTransporter(xmlrpclib.Transport):
+  email = ""
+  password = ""
+  new_user = None
+  cookie_file = "cookie.lwp"
 
-        for cookie in cj:
-            if cookie.name == 'UUID':
-                uuidstr = cookie.value
-            connection.putheader("Cookie", "%s=%s" % (cookie.name,cookie.value))
+  def send_host(self, conn, host):
+    xmlrpclib.Transport.send_host(self, conn, host)
 
-    ## override the send_host hook to also send authentication info
-    def send_host(self, connection, host):
-        xmlrpclib.Transport.send_host(self, connection, host)
-        if os.path.exists(self.cookiefile):
-            self.send_cookie_auth(connection)
-        elif self.credentials != ():
-            self.send_basic_auth(connection)
+    if ((self.email == "" or self.password == "") and not os.path.exists(self.cookie_file)) or ((self.email == "" or self.password == "") and self.new_user):
+      print "Wrong email or password."
+      sys.exit(1)
+
+    # informowanie o autoryzacookie_jari
+    if not os.path.exists(self.cookie_file):
+      print "No cookie file."
+      auth = "Data " + base64.encodestring(self.email + ":" + self.password).strip()
+
+      if not self.new_user:
+        conn.putheader('signin', auth)
+      else:
+        conn.putheader('register', auth)
+
+    # pobieranie danych z cookies'ow
+    else:
+      cookie_jar = cookielib.LWPCookieJar()
+      cookie_jar.load(self.cookie_file)
+
+      for cookie in cookie_jar:
+        conn.putheader(cookie.name, cookie.value)
                     
-    def request(self, host, handler, request_body, verbose=0):
-        # dummy request class for extracting cookies 
-        class CookieRequest(urllib2.Request):
-            pass
+  def request(self, host, handler, content, verbose = 0):
+    uri = "http://" + host
+    request = urllib2.Request(uri)
             
-        # dummy response class for extracting cookies 
-        class CookieResponse:
-            def __init__(self, headers):
-                self.headers = headers
-            def info(self):
-                return self.headers 
+    conn = self.make_connection(host)
 
-        crequest = CookieRequest('http://'+host+'/')
+    if verbose:
+      conn.set_debuglevel(1)
+    self.verbose = verbose
+
+    self.send_request(conn, handler, content)
+    self.send_host(conn, host)
+    self.send_user_agent(conn)                     
+    self.send_content(conn, content)
             
-        # issue XML-RPC request
-        h = self.make_connection(host)
-        if verbose:
-            h.set_debuglevel(1)
+    error, error_msg, headers = conn.getreply()
 
-        self.send_request(h, handler, request_body)
-        self.send_host(h, host)
-        self.send_user_agent(h)
-        
-        # creating a cookie jar for my cookies
-        cj = cookielib.LWPCookieJar()
-                        
-        self.send_content(h, request_body)
-            
-        response = h.getresponse()
-        headers = response.getheaders()
+    cookie_jar = cookielib.LWPCookieJar()
+    cookie_jar.extract_cookies(Cookie(headers), request)
 
-        cresponse = CookieResponse(response)
-        cj.extract_cookies(cresponse, crequest)
-
-        if len(cj) >0 and self.cookiefile != None:
-            cj.save(self.cookiefile)
-
-        if response.status != 200:
-            raise ProtocolError(
-                 host + handler,
-                 response.status,
-                 response.reason,
-                 headers
-                 )
-
-        self.verbose = verbose
-
-        return self._parse_response(response.read())
-
-def getXmlrpcClient(server_uri, auth = ()):
-    """ this will return an xmlrpc client which supports
-    basic authentication/authentication through cookies 
-    """
-
-    trans = CookieAuthXMLRPCTransport()
-    if auth!= ():
-        trans.credentials = auth
-    client = xmlrpclib.Server(server_uri, transport=trans, verbose=False)
-    
-    return client
-
-if __name__ == "__main__":
-    email = 'email@address.com'
-    machine_name = 'vaikings'
-    
-    client = getXmlrpcClient('http://localhost:8088', (email,machine_name))
-#    client = getXmlrpcClient('http://localhost:8088')
-    inputstr1 = "hello"
-    inputstr2 = "world"
+    if len(cookie_jar) > 0 and self.cookie_file != None:
+      cookie_jar.save(self.cookie_file)
+                
+    if error != 200:
+      raise ProtocolError(host + handler, error, error_msg, headers)
 
     try:
-        retstr = client.hello_world(inputstr1, inputstr2)
-        print retstr
+      socket = conn._conn.sock
+    except AttributeError:
+      socket = None
+                
+    return self._parse_response(conn.getfile(), socket)
 
-        print client.hey('hey')
-    except Exception, e:
-        print e
+def set_up_connection(serv, port, email, password, new_user):
+  transporter = CookieClientTransporter()
+
+  transporter.email = email
+  transporter.password = password
+  transporter.new_user = new_user
+
+  uri = "http://" + serv + ":" + port
+  client = xmlrpclib.Server(uri, transport=transporter, verbose=False)
+    
+  return client
+
+def usage():
+  print "-----------------------------------------------------------------------------------------------\n"
+  print " XML-RPC Client\n\n"
+  print " Uzycie: program [-s SERWER] [-p PORT] [-e EMAIL] [-n NAZWA] [-r] [--help|-h]\n\n"
+  print " Prosty klient umozliwiajacy komunikacookie_jare z serwerem XML-RPC w celu wysylania requestow\n"
+  print " z wywolaniami prostych metod.\n"
+  print " Jak dziala:\n"
+  print " 1. Przy probie pierwszego polaczenia z serwerem nalezy wczesniej zarejestrowac hosta, przy\n"
+  print " uzyciu argumentu -r oraz padniu email'a i hasla. Serwer zarejestruje host i ustawi plik\n"
+  print " cookie.\n"
+  print " 2. Przy probie kolejnego polaczenia client bedzie pobieral dane uwierzytelniajace z pliku\n"
+  print " cookie, jesli taki istnieje, z podaniem danych lub bez ich podania.\n"
+  print " 3. Jesli plik cookie nie bedzie istnial, a host zostal zarejestrowany to serwer go utworzy.\n"
+  print " 4. Plik cookie zostanie nadpisany w przypadku rejestracji nowego hosta. \n"
+  print "-----------------------------------------------------------------------------------------------\n"
+
+# glowna funkcookie_jara
+def main():
+  try:
+    opts, args = getopt.getopt(sys.argv[1:], "rhs:p:e:n:", ["help"])
+
+    serv = "localhost"
+    port = "8088"
+    email = ""
+    name = ""
+    new_user = None
+
+    for opt, val in opts:
+      if opt in ("-h", "--help"):
+        usage()
+        sys.exit(0)
+      elif opt == "-s":
+        serv = val
+      elif opt == "-p":
+        port = val
+      elif opt == "-e":
+        email = val
+      elif opt == "-n":
+        name = val
+      elif opt == "-r":
+        new_user = True
+
+    print email
+    
+    client = set_up_connection(serv, port, email, name, new_user)
+
+    print client.add(2, 2)
+    print client.minus(4, 1)
+    print client.println("Bla bla...")
+    print client.ble()
+
+  except getopt.GetoptError as err:
+    print str(err)
+    usage()
+    sys.exit(1)
+  except ValueError:
+    usage()
+    sys.exit(1)
+  except Exception as err:
+    print str(err)
+    sys.exit(1)
+
+# main
+if __name__ == '__main__':
+  main()
+    
