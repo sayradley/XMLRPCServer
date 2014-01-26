@@ -13,13 +13,7 @@
 #                                                               #
 #################################################################
 
-import getopt
-import sys
-import os
-import cookielib
-import base64
-import xmlrpclib
-import urllib2
+import getopt, xmlrpclib, urllib2, sys, os, cookielib, base64
 
 class Cookie:
   def __init__(self, content):
@@ -33,31 +27,6 @@ class CookieClientTransporter(xmlrpclib.Transport):
   password = ""
   new_user = None
   cookie_file = "cookie.lwp"
-
-  def send_host(self, conn, host):
-    xmlrpclib.Transport.send_host(self, conn, host)
-
-    if ((self.email == "" or self.password == "") and not os.path.exists(self.cookie_file)) or ((self.email == "" or self.password == "") and self.new_user):
-      print "Wrong email or password."
-      sys.exit(1)
-
-    # informowanie o autoryzacookie_jari
-    if not os.path.exists(self.cookie_file):
-      print "No cookie file."
-      auth = "Data " + base64.encodestring(self.email + ":" + self.password).strip()
-
-      if not self.new_user:
-        conn.putheader('signin', auth)
-      else:
-        conn.putheader('register', auth)
-
-    # pobieranie danych z cookies'ow
-    else:
-      cookie_jar = cookielib.LWPCookieJar()
-      cookie_jar.load(self.cookie_file)
-
-      for cookie in cookie_jar:
-        conn.putheader(cookie.name, cookie.value)
                     
   def request(self, host, handler, content, verbose = 0):
     uri = "http://" + host
@@ -91,6 +60,31 @@ class CookieClientTransporter(xmlrpclib.Transport):
       socket = None
                 
     return self._parse_response(conn.getfile(), socket)
+
+  def send_host(self, conn, host):
+    xmlrpclib.Transport.send_host(self, conn, host)
+
+    if ((self.email == "" or self.password == "") and not os.path.exists(self.cookie_file)) or ((self.email == "" or self.password == "") and self.new_user):
+      print "Wrong email or password."
+      sys.exit(1)
+
+    # informowanie o autoryzacookie_jari
+    if not os.path.exists(self.cookie_file):
+      print "No cookie file."
+      auth = "Data " + base64.encodestring(self.email + ":" + self.password).strip()
+
+      if not self.new_user:
+        conn.putheader('signin', auth)
+      else:
+        conn.putheader('register', auth)
+
+    # pobieranie danych z cookies'ow
+    else:
+      cookie_jar = cookielib.LWPCookieJar()
+      cookie_jar.load(self.cookie_file)
+
+      for cookie in cookie_jar:
+        conn.putheader(cookie.name, cookie.value)
 
 def set_up_connection(serv, port, email, password, new_user):
   transporter = CookieClientTransporter()

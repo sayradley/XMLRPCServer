@@ -13,13 +13,7 @@
 #                                                               #
 #################################################################
 
-import getopt
-import sys
-import shelve
-import uuid
-import base64
-import socket
-import Cookie
+import Cookie, sys, shelve, uuid, base64, getopt, socket
 from SimpleXMLRPCServer import *  
 
 class Host:
